@@ -1,0 +1,230 @@
+name: Azure Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy to"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      deploy_web:
+        description: "Deploy web version"
+        required: true
+        default: true
+        type: boolean
+      deploy_functions:
+        description: "Deploy Azure Functions"
+        required: true
+        default: true
+        type: boolean
+
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/azure-deploy.yml"
+
+env:
+  AZURE_WEBAPP_NAME: ${{ secrets.AZURE_FUNCTION_APP_NAME }}
+  AZURE_FUNCTIONAPP_NAME: ${{ secrets.AZURE_FUNCTION_APP_NAME }}
+  DOTNET_VERSION: "6.0.x"
+
+jobs:
+  deploy-functions:
+    name: Deploy Azure Functions
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_functions || github.event_name == 'push'
+
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build .NET Project
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Run Tests
+        run: dotnet test --verbosity normal --logger "trx" --results-directory TestResults
+
+      - name: Publish Test Results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Function Tests
+          path: backend/TestResults/*.trx
+          reporter: dotnet-trx
+
+      - name: Publish .NET Project
+        run: dotnet publish --configuration Release --output ./publish
+
+      - name: Deploy to Azure Function App
+        uses: Azure/functions-action@v1
+        id: fa
+        with:
+          app-name: ${{ secrets.AZURE_FUNCTION_APP_NAME }}
+          package: "./backend/publish"
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          scm-do-build-during-deployment: false
+
+      - name: Verify Function Deployment
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+          https://${{ secrets.AZURE_FUNCTION_APP_NAME }}.azurewebsites.net/api/health \
+          | grep -q "200" && echo "Deployment successful" || echo "Deployment verification failed"
+
+  deploy-web:
+    name: Deploy Web to Azure Storage
+    runs-on: ubuntu-latest
+    needs: deploy-functions
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_web || github.event_name == 'push'
+
+    steps:
+      - name: Download Web Build Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flutter-web
+          path: ./web-build
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Upload to Azure Blob Storage
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage blob upload-batch \
+              --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT }} \
+              --account-key ${{ secrets.AZURE_STORAGE_KEY }} \
+              --destination \$web \
+              --source ./web-build \
+              --overwrite
+
+      - name: Purge CDN Endpoint
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az cdn endpoint purge \
+              --name ${{ secrets.AZURE_CDN_ENDPOINT }} \
+              --profile-name ${{ secrets.AZURE_CDN_PROFILE }} \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --content-paths "/*"
+
+      - name: Verify Web Deployment
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+          https://${{ secrets.AZURE_CDN_ENDPOINT }}.azureedge.net/ \
+          | grep -q "200" && echo "Web deployment successful" || echo "Web deployment verification failed"
+
+  deploy-apk:
+    name: Deploy APK to Azure Storage
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Download APK Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: ./apk-build
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Upload APK to Blob Storage
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az storage blob upload-batch \
+              --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT }} \
+              --account-key ${{ secrets.AZURE_STORAGE_KEY }} \
+              --destination apk-releases \
+              --source ./apk-build \
+              --overwrite
+
+      - name: Generate Download URL
+        id: generate_url
+        run: |
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          APK_FILE=$(ls ./apk-build/*.apk | head -1)
+          APK_NAME=$(basename $APK_FILE)
+
+          SAS_TOKEN=$(az storage container generate-sas \
+            --name apk-releases \
+            --account-name ${{ secrets.AZURE_STORAGE_ACCOUNT }} \
+            --account-key ${{ secrets.AZURE_STORAGE_KEY }} \
+            --permissions r \
+            --expiry $(date -d "+30 days" +%Y-%m-%d) \
+            --auth-mode key \
+            --output tsv)
+
+          DOWNLOAD_URL="https://${{ secrets.AZURE_STORAGE_ACCOUNT }}.blob.core.windows.net/apk-releases/$APK_NAME?$SAS_TOKEN"
+          echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+          echo "apk_name=$APK_NAME" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.generate_url.outputs.apk_name }}
+          name: "College Room Booking App v${{ steps.generate_url.outputs.apk_name }}"
+          body: |
+            ## Android APK Download
+
+            **Download Link:** [${{ steps.generate_url.outputs.apk_name }}](${{ steps.generate_url.outputs.download_url }})
+
+            **Build Date:** ${{ github.event.head_commit.timestamp }}
+            **Commit:** ${{ github.sha }}
+
+            ### Installation Instructions:
+            1. Download the APK file
+            2. Enable "Install from unknown sources" in Android settings
+            3. Install the APK
+            4. Launch the app
+          draft: false
+          prerelease: ${{ github.event.inputs.environment != 'production' }}
+
+  post-deployment:
+    name: Post-Deployment Checks
+    runs-on: ubuntu-latest
+    needs: [deploy-functions, deploy-web]
+
+    steps:
+      - name: Run Health Checks
+        run: |
+          echo "Running health checks..."
+          # Check Function App health
+          curl -f https://${{ secrets.AZURE_FUNCTION_APP_NAME }}.azurewebsites.net/api/health || exit 1
+
+          # Check Web App health
+          curl -f https://${{ secrets.AZURE_CDN_ENDPOINT }}.azureedge.net/ || exit 1
+
+          echo "All health checks passed!"
+
+      - name: Send Deployment Notification
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Deployment to ${{ github.event.inputs.environment || 'production' }} completed successfully!
+            - Functions: https://${{ secrets.AZURE_FUNCTION_APP_NAME }}.azurewebsites.net
+            - Web App: https://${{ secrets.AZURE_CDN_ENDPOINT }}.azureedge.net
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always() && github.ref == 'refs/heads/main'

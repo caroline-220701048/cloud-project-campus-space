@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "945390667505",
+    "project_id": "college-meeting-room",
+    "storage_bucket": "college-meeting-room.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:945390667505:android:a1f65f5b94b07017bf8b50",
+        "android_client_info": {
+          "package_name": "com.example.college_meeting_room"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBY0aHvtsFDxi7A_PBSFkZLOI0niNC0cCo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

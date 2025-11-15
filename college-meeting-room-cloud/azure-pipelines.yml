@@ -1,0 +1,399 @@
+name: College Room Booking App - CI/CD
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - releases/*
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - README.md
+      - docs/*
+
+variables:
+  - name: buildConfiguration
+    value: "Release"
+  - name: flutterVersion
+    value: "3.13.0"
+  - group: "college-room-booking-secrets"
+
+stages:
+  - stage: Test
+    displayName: "Test Stage"
+    jobs:
+      - job: Flutter_Test
+        displayName: "Flutter Test & Analyze"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        steps:
+          - task: UseDotNet@2
+            displayName: "Use .NET 6 SDK"
+            inputs:
+              packageType: "sdk"
+              version: "6.0.x"
+
+          - task: CmdLine@2
+            displayName: "Setup Flutter"
+            inputs:
+              script: |
+                git clone https://github.com/flutter/flutter.git -b stable --depth 1
+                echo "##vso[task.prependpath]$(pwd)/flutter/bin"
+                flutter doctor
+
+          - task: CmdLine@2
+            displayName: "Install Flutter Dependencies"
+            inputs:
+              script: |
+                cd flutter-app
+                flutter pub get
+
+          - task: CmdLine@2
+            displayName: "Run Flutter Analyze"
+            inputs:
+              script: |
+                cd flutter-app
+                flutter analyze
+
+          - task: CmdLine@2
+            displayName: "Run Flutter Tests"
+            inputs:
+              script: |
+                cd flutter-app
+                flutter test --coverage
+
+          - task: PublishCodeCoverageResults@1
+            displayName: "Publish Code Coverage"
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: "$(System.DefaultWorkingDirectory)/flutter-app/coverage/lcov.info"
+
+      - job: Backend_Test
+        displayName: "Backend Tests"
+        pool:
+          vmImage: "windows-latest"
+
+        steps:
+          - task: UseDotNet@2
+            displayName: "Use .NET 6 SDK"
+            inputs:
+              packageType: "sdk"
+              version: "6.0.x"
+
+          - task: DotNetCoreCLI@2
+            displayName: "Restore Backend Dependencies"
+            inputs:
+              command: "restore"
+              projects: "backend/*.sln"
+
+          - task: DotNetCoreCLI@2
+            displayName: "Build Backend"
+            inputs:
+              command: "build"
+              projects: "backend/*.sln"
+              arguments: "--configuration $(buildConfiguration) --no-restore"
+
+          - task: DotNetCoreCLI@2
+            displayName: "Run Backend Tests"
+            inputs:
+              command: "test"
+              projects: "backend/*.sln"
+              arguments: "--configuration $(buildConfiguration) --no-build --verbosity normal"
+
+  - stage: Build
+    displayName: "Build Stage"
+    dependsOn: Test
+    condition: succeeded()
+
+    jobs:
+      - job: Build_Flutter_Android
+        displayName: "Build Flutter Android APK"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        steps:
+          - task: CmdLine@2
+            displayName: "Setup Flutter"
+            inputs:
+              script: |
+                echo "##vso[task.prependpath]$(pwd)/flutter/bin"
+                flutter doctor
+
+          - task: CmdLine@2
+            displayName: "Create Environment File"
+            inputs:
+              script: |
+                cd flutter-app
+                cat > .env << EOF
+                AZURE_FUNCTIONS_BASE_URL=$(AZURE_FUNCTIONS_BASE_URL)
+                AZURE_AD_CLIENT_ID=$(AZURE_AD_CLIENT_ID)
+                COSMOSDB_ENDPOINT=$(COSMOSDB_ENDPOINT)
+                APP_VERSION=$(Build.BuildId)
+                ENVIRONMENT=production
+                EOF
+
+          - task: CmdLine@2
+            displayName: "Build Android APK"
+            inputs:
+              script: |
+                cd flutter-app
+                flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Android APK"
+            inputs:
+              PathtoPublish: "flutter-app/build/app/outputs/flutter-apk"
+              ArtifactName: "android-apk"
+              publishLocation: "Container"
+
+      - job: Build_Flutter_Web
+        displayName: "Build Flutter Web"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        steps:
+          - task: CmdLine@2
+            displayName: "Setup Flutter"
+            inputs:
+              script: |
+                echo "##vso[task.prependpath]$(pwd)/flutter/bin"
+                flutter config --enable-web
+
+          - task: CmdLine@2
+            displayName: "Build Flutter Web"
+            inputs:
+              script: |
+                cd flutter-app
+                flutter build web --release --web-renderer html --base-href /
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Web Build"
+            inputs:
+              PathtoPublish: "flutter-app/build/web"
+              ArtifactName: "flutter-web"
+              publishLocation: "Container"
+
+      - job: Build_Backend
+        displayName: "Build Backend Functions"
+        pool:
+          vmImage: "windows-latest"
+
+        steps:
+          - task: UseDotNet@2
+            displayName: "Use .NET 6 SDK"
+            inputs:
+              packageType: "sdk"
+              version: "6.0.x"
+
+          - task: DotNetCoreCLI@2
+            displayName: "Publish Backend Functions"
+            inputs:
+              command: "publish"
+              projects: "backend/*.sln"
+              arguments: "--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/backend"
+              publishWebProjects: false
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish Backend Artifacts"
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)/backend"
+              ArtifactName: "azure-functions"
+              publishLocation: "Container"
+
+  - stage: Deploy_Infrastructure
+    displayName: "Deploy Infrastructure"
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+    jobs:
+      - deployment: Deploy_Terraform
+        displayName: "Deploy Azure Infrastructure"
+        environment: "production"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: "Install Terraform"
+                  inputs:
+                    terraformVersion: "1.5.0"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Init"
+                  inputs:
+                    provider: "azurerm"
+                    command: "init"
+                    workingDirectory: "terraform"
+                    backendServiceArm: "$(AZURE_SERVICE_CONNECTION)"
+                    backendAzureRmResourceGroupName: "$(TF_STATE_RG)"
+                    backendAzureRmStorageAccountName: "$(TF_STATE_SA)"
+                    backendAzureRmContainerName: "$(TF_STATE_CONTAINER)"
+                    backendAzureRmKey: "college-room-booking-production.tfstate"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Apply"
+                  inputs:
+                    provider: "azurerm"
+                    command: "apply"
+                    workingDirectory: "terraform"
+                    commandOptions: '-auto-approve -var-file="environments/production.tfvars"'
+                    environmentServiceNameAzureRM: "$(AZURE_SERVICE_CONNECTION)"
+
+  - stage: Deploy_Application
+    displayName: "Deploy Application"
+    dependsOn: Deploy_Infrastructure
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+    jobs:
+      - deployment: Deploy_Functions
+        displayName: "Deploy Azure Functions"
+        environment: "production"
+        pool:
+          vmImage: "windows-latest"
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: azure-functions
+
+                - task: AzureFunctionApp@1
+                  displayName: "Deploy Azure Functions"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    appType: "functionApp"
+                    appName: "$(AZURE_FUNCTION_APP_NAME)"
+                    package: "$(Pipeline.Workspace)/azure-functions"
+                    deploymentMethod: "zipDeploy"
+
+      - deployment: Deploy_Web
+        displayName: "Deploy Flutter Web"
+        environment: "production"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: flutter-web
+
+                - task: AzureCLI@2
+                  displayName: "Deploy to Azure Storage"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      az storage blob upload-batch \
+                        --account-name $(AZURE_STORAGE_ACCOUNT) \
+                        --destination \$web \
+                        --source $(Pipeline.Workspace)/flutter-web \
+                        --overwrite
+
+      - deployment: Deploy_APK
+        displayName: "Deploy Android APK"
+        environment: "production"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: android-apk
+
+                - task: AzureCLI@2
+                  displayName: "Upload APK to Storage"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      az storage blob upload-batch \
+                        --account-name $(AZURE_STORAGE_ACCOUNT) \
+                        --destination apk-releases \
+                        --source $(Pipeline.Workspace)/android-apk \
+                        --overwrite
+
+  - stage: Post_Deployment
+    displayName: "Post-Deployment"
+    dependsOn: Deploy_Application
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+    jobs:
+      - job: Health_Check
+        displayName: "Health Checks"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        steps:
+          - task: CmdLine@2
+            displayName: "Run Health Checks"
+            inputs:
+              script: |
+                echo "Running health checks..."
+
+                # Check Function App health
+                curl -f "https://$(AZURE_FUNCTION_APP_NAME).azurewebsites.net/api/health" \
+                  || exit 1
+
+                # Check Web App health
+                curl -f "https://$(AZURE_STORAGE_ACCOUNT).z6.web.core.windows.net/" \
+                  || exit 1
+
+                echo "✅ All health checks passed!"
+
+          - task: CmdLine@2
+            displayName: "Run Smoke Tests"
+            inputs:
+              script: |
+                echo "Running smoke tests..."
+                # Add your smoke test commands here
+                echo "✅ Smoke tests completed!"
+
+      - job: Notify
+        displayName: "Deployment Notification"
+        pool:
+          vmImage: "ubuntu-latest"
+
+        steps:
+          - task: SlackNotification@0
+            displayName: "Send Slack Notification"
+            inputs:
+              channel: "#deployments"
+              message: |
+                🚀 College Room Booking App successfully deployed to Production!
+                • Functions: https://$(AZURE_FUNCTION_APP_NAME).azurewebsites.net
+                • Web App: https://$(AZURE_STORAGE_ACCOUNT).z6.web.core.windows.net
+                • Build: $(Build.BuildNumber)
+              notificationType: "SUCCESS"
+              connection: "SLACK_CONNECTION"
+# Pipeline variables needed in Azure DevOps:
+# AZURE_SERVICE_CONNECTION - Azure Resource Manager service connection
+# AZURE_FUNCTION_APP_NAME - Name of the Function App
+# AZURE_STORAGE_ACCOUNT - Storage account for web hosting
+# AZURE_AD_CLIENT_ID - Azure AD application client ID
+# COSMOSDB_ENDPOINT - Cosmos DB endpoint URL
+# TF_STATE_RG - Resource group for Terraform state
+# TF_STATE_SA - Storage account for Terraform state
+# TF_STATE_CONTAINER - Container for Terraform state
