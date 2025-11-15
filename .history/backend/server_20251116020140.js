@@ -10,7 +10,7 @@ import userRoutes from "./routes/users.js";
 const app = express();
 app.use(cors());
 app.use(express.json());
-const rawPort = process.env.PORT ?? process.env.WEBSITE_PORT ?? "5000";
+const rawPort = process.env.PORT ?? process.env.WEBSITE_PORT ?? "4000";
 const isPipe = (p) => typeof p === 'string' && (p.startsWith('\\\\.\\pipe\\') || p.startsWith('/'));
 
 let port;
