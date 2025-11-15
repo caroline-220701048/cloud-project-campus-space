@@ -25,7 +25,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     console.error(
       `Could not load local serviceAccountKey.json at ${localPath}. ` +
       `If running in Azure, set FIREBASE_SERVICE_ACCOUNT app setting with the JSON content.,
-      err`
+      err
     );
     throw err;
   }

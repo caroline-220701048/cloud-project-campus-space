@@ -20,12 +20,12 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
     const raw = await fs.readFile(localPath, "utf8");
     serviceAccount = JSON.parse(raw);
-    console.log(`Loaded Firebase service account from ${localPath}`);
+    console.log('Loaded Firebase service account from ${localPath});
   } catch (err) {
     console.error(
       `Could not load local serviceAccountKey.json at ${localPath}. ` +
-      `If running in Azure, set FIREBASE_SERVICE_ACCOUNT app setting with the JSON content.,
-      err`
+      If running in Azure, set FIREBASE_SERVICE_ACCOUNT app setting with the JSON content.,
+      err
     );
     throw err;
   }
