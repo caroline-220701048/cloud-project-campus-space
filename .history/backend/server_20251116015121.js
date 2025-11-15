@@ -17,4 +17,4 @@ app.use("/api", roomRoutes);
 app.use("/api", bookingRoutes);
 app.use("/api", userRoutes);
 
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(Port, () => console.log(`Server running on port ${rawPort}`));

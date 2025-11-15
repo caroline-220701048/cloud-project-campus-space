@@ -10,11 +10,12 @@ import userRoutes from "./routes/users.js";
 const app = express();
 app.use(cors());
 app.use(express.json());
+const rawPort = process.env.PORT
 const rawPort = process.env.PORT ?? process.env.WEBSITE_PORT ?? process.env.PORT_NUMBER ?? '4000';
 const parsed = Number.parseInt(rawPort, 10);
-const port = Number.isFinite(parsed) && parsed > 0 && parsed < 65536 ? parsed : 5000;
+const port = Number.isFinite(parsed) && parsed > 0 && parsed < 65536 ? parsed : 4000;
 app.use("/api", roomRoutes);
 app.use("/api", bookingRoutes);
 app.use("/api", userRoutes);
 
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(rawPort, () => console.log(`Server running on port ${rawPort}`));
